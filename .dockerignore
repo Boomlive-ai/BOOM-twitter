@@ -1,0 +1,57 @@
+# Git
+.git
+.gitignore
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+# Environment variables (don't include in Docker build)
+.env
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+Dockerfile
+.dockerignore
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Test files and coverage reports
+tests/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Documentation
+docs/
+README.md
+LICENSE
+
+# Temporary files
+tmp/
+temp/
