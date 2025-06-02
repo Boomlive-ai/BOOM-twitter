@@ -1,4 +1,4 @@
-import os
+import os, pytz
 import time
 import logging
 import asyncio
@@ -7,9 +7,12 @@ from dotenv import load_dotenv
 import tweepy
 import requests
 from datetime import datetime, timedelta
+from media_processor import MediaProcessor
+import tempfile
 
 # Load env
 load_dotenv()
+IST = pytz.timezone('Asia/Kolkata')
 
 # Logging setup
 logging.basicConfig(level=logging.INFO,
@@ -24,8 +27,9 @@ TWITTER_ACCESS_TOKEN        = os.getenv("TWITTER_ACCESS_TOKEN")
 TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_SECRET")
 TWITTER_BEARER_TOKEN        = os.getenv("TWITTER_BEARER_TOKEN")
 BOT_USERNAME                = os.getenv("BOT_USERNAME", "").lower()
-CHECK_INTERVAL              = 660  # 15 minutes = 900 seconds
+CHECK_INTERVAL              = 900  # 15 minutes = 900 seconds
 LLM_API_URL                 = os.getenv("LLM_API_URL")
+MEDIA_API_URL               = os.getenv("MEDIA_API_URL")  # New: API for processing media to text
 DEFAULT_REPLY               = "Sorry, I can't answer right now."
 
 # Free tier limits (adjust as needed for testing)
@@ -42,6 +46,8 @@ if not BOT_USERNAME:
     raise SystemExit(1)
 if not LLM_API_URL:
     logger.warning("LLM_API_URL not set; will use default replies.")
+if not MEDIA_API_URL:
+    logger.warning("MEDIA_API_URL not set; media processing will be disabled.")
 
 # Tweepy client - Free tier setup
 client = tweepy.Client(
@@ -53,27 +59,45 @@ client = tweepy.Client(
     wait_on_rate_limit=False  # We'll handle rate limits manually for better control
 )
 
+# Initialize media processor - create one instance and reuse it
+media_processor = MediaProcessor()
+
 # Track last processed IDs and startup time
 last_mention_id = None
 bot_start_time = datetime.utcnow()
 processed_tweet_ids = set()  # Keep track of processed tweets to avoid duplicates
 
-async def fetch_llm_response(question: str, thread_id: str) -> str:
-    """Fetch response from LLM API with error handling"""
+async def fetch_llm_response(question: str, thread_id: str, media_description: str = "") -> str:
+    """Fetch response from LLM API with error handling and media context"""
     if not LLM_API_URL:
         return DEFAULT_REPLY
     
     try:
-        logger.info(f"Sending to LLM: {question[:50]}...")
+        # Combine text question with media description
+        full_question = question
+        if media_description:
+            full_question = f"{question}\n\n[Media content: {media_description}]"
+        
+        logger.info(f"Sending to LLM: {full_question[:100]}...")
+        
+        params = {
+            "question": full_question, 
+            "thread_id": thread_id
+        }
+        
+        # Add media context as separate parameter if available
+        if media_description:
+            params["media_context"] = media_description
+        
         resp = requests.get(
             LLM_API_URL, 
-            params={"question": question, "thread_id": thread_id}, 
+            params=params, 
             timeout=30
         )
+        
         if resp.status_code == 200:
-            response_json = resp.json()  # Convert response to a dictionary
-            response_text = response_json.get("response", DEFAULT_REPLY)  # Extract the actual response
-            print(response_text)
+            response_json = resp.json()
+            response_text = response_json.get("response", DEFAULT_REPLY)
             logger.info(f"LLM response received: {len(response_text)} characters")
             return response_text
         else:
@@ -102,12 +126,72 @@ async def get_user_info(user_id: str) -> dict:
         "name": "Unknown User"
     }
 
+async def process_tweet_media(tweet_id: str, media_objects) -> str:
+    """Process media from tweet and return description using the global media processor"""
+    if not media_objects or not MEDIA_API_URL:
+        return ""
+    
+    try:
+        logger.info(f"🖼️ Processing {len(media_objects)} media files from tweet {tweet_id}")
+        
+        # Use the complete media processing pipeline
+        result = await media_processor.process_tweet_media_complete(
+            media_objects, 
+            tweet_id, 
+            MEDIA_API_URL
+        )
+        
+        # Check for errors
+        if result.get('errors'):
+            logger.warning(f"⚠️ Media processing had errors: {result['errors']}")
+        
+        media_description = result.get('combined_description', '')
+        
+        if media_description:
+            logger.info(f"✅ Media processed successfully: {len(media_description)} chars from {result['summary']['processed_count']} files")
+            # Log media summary for debugging
+            summary = result.get('summary', {})
+            logger.info(f"📊 Media summary: {summary.get('total_files', 0)} files - {summary.get('types', {})}")
+            return media_description
+        else:
+            logger.warning("⚠️ No description returned from media processing")
+            return ""
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing media for tweet {tweet_id}: {e}")
+        return ""
+
+def extract_media_from_tweet_response(tweet, includes):
+    """Extract media objects from tweet response"""
+    media_objects = []
+    
+    try:
+        # Check if tweet has media attachments
+        if hasattr(tweet, 'attachments') and tweet.attachments:
+            media_keys = tweet.attachments.get('media_keys', [])
+            
+            # Get media objects from includes
+            if includes and 'media' in includes and media_keys:
+                media_lookup = {media.media_key: media for media in includes['media']}
+                
+                for media_key in media_keys:
+                    if media_key in media_lookup:
+                        media_objects.append(media_lookup[media_key])
+                
+                logger.info(f"🖼️ Found {len(media_objects)} media files for tweet {tweet.id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting media from tweet {tweet.id}: {e}")
+    
+    return media_objects
+
 async def poll_mentions():
-    """Poll for mentions every 15 minutes - Free tier optimized"""
+    """Poll for mentions every 15 minutes - Free tier optimized with media processing"""
     global last_mention_id
     
     logger.info(f"🚀 Starting mention polling (every {CHECK_INTERVAL/60} minutes)")
     logger.info(f"Bot username: @{BOT_USERNAME}")
+    logger.info(f"Media processing: {'enabled' if MEDIA_API_URL else 'disabled'}")
     
     # Wait before first poll
     logger.info("Waiting 30 seconds before first mention poll...")
@@ -127,8 +211,10 @@ async def poll_mentions():
             params = {
                 "query": query,
                 "max_results": MAX_TWEETS_PER_POLL,
-                "tweet_fields": ["author_id", "created_at", "public_metrics"],
-                "user_fields": ["username"]
+                "tweet_fields": ["author_id", "created_at", "public_metrics", "attachments"],
+                "user_fields": ["username"],
+                "expansions": ["attachments.media_keys"],
+                "media_fields": ["media_key", "type", "url", "variants", "width", "height", "duration_ms", "alt_text"]
             }
 
             # Use since_id only if we have processed tweets before
@@ -138,11 +224,9 @@ async def poll_mentions():
             try:
                 resp = client.search_recent_tweets(**params)
                 tweets = resp.data if resp.data else []
-                users = {user.id: user for user in (resp.includes.get('users', []) if resp.includes else [])}
-                print(f"USERS: {users}")
+                
             except tweepy.TooManyRequests as e:
                 wait_time = int(e.response.headers.get("x-rate-limit-reset", time.time())) - time.time()
-                print(f"Wait time: {wait_time}")
                 wait_time = max(wait_time, 60)  # Ensure a minimum wait of 1 minute
                 logger.warning(f"⚠️ Rate limit hit, sleeping for {wait_time//60} minutes...")
                 await asyncio.sleep(wait_time)
@@ -188,12 +272,24 @@ async def poll_mentions():
                         
                         logger.info(f"📝 Processing tweet {tweet.id}: {text[:50]}...")
                         
+                        # Process media if present
+                        media_description = ""
+                        if MEDIA_API_URL:
+                            # Extract media objects from the response
+                            media_objects = extract_media_from_tweet_response(tweet, resp.includes)
+                            
+                            if media_objects:
+                                logger.info(f"🖼️ Found {len(media_objects)} media files in tweet {tweet.id}")
+                                media_description = await process_tweet_media(str(tweet.id), media_objects)
+                            else:
+                                logger.debug(f"📷 No media found in tweet {tweet.id}")
+                        
                         # Get user info
                         user_info = await get_user_info(str(tweet.author_id))
                         username = user_info["username"]
                         
-                        # Get LLM response
-                        reply = await fetch_llm_response(text, str(tweet.author_id))
+                        # Get LLM response with media context
+                        reply = await fetch_llm_response(text, str(tweet.author_id), media_description)
                         
                         # Ensure reply fits Twitter's character limit
                         max_reply_length = 250  # Leave room for @username
@@ -209,8 +305,9 @@ async def poll_mentions():
                                 text=reply_text,
                                 in_reply_to_tweet_id=tweet.id
                             )
-                            print(f"Reply created: {response_tweet.data.id}")
-                            logger.info(f"✅ Successfully replied to @{username} (tweet {tweet.id})")
+                            
+                            media_info = f" (with {len(media_description.split('|')) if media_description else 0} media descriptions)" if media_description else ""
+                            logger.info(f"✅ Successfully replied to @{username} (tweet {tweet.id}){media_info}")
                             successful_replies += 1
                             
                             # Delay between replies to avoid rate limits
@@ -244,20 +341,23 @@ async def poll_mentions():
         
         # Wait for next poll cycle
         next_poll_time = datetime.utcnow() + timedelta(seconds=CHECK_INTERVAL)
-        logger.info(f"💤 Sleeping until next poll at {next_poll_time.strftime('%H:%M:%S')} ({CHECK_INTERVAL/60} minutes)")
+        next_poll_time_ist = next_poll_time.astimezone(IST)
+
+        logger.info(f"💤 Sleeping until next poll at {next_poll_time_ist.strftime('%H:%M:%S')} ({CHECK_INTERVAL/60} minutes)")
         await asyncio.sleep(CHECK_INTERVAL)
 
 # FastAPI app
-app = FastAPI(title="Twitter Bot - Free Tier", version="1.0.0")
+app = FastAPI(title="Twitter Bot with Media Processing", version="2.0.0")
 
 @app.on_event("startup")
 async def startup():
     """Start the polling tasks"""
-    logger.info("🚀 Starting Twitter bot (Free Tier Version)")
+    logger.info("🚀 Starting Twitter bot with media processing")
     logger.info(f"Bot username: @{BOT_USERNAME}")
     logger.info(f"Check interval: {CHECK_INTERVAL/60} minutes")
     logger.info(f"Max tweets per poll: {MAX_TWEETS_PER_POLL}")
     logger.info(f"LLM API URL: {LLM_API_URL}")
+    logger.info(f"Media API URL: {MEDIA_API_URL}")
     logger.info("📝 Note: DM polling disabled (not available in free tier)")
     
     # Test API connection
@@ -273,12 +373,19 @@ async def startup():
     # Start mention polling
     asyncio.create_task(poll_mentions())
 
+@app.on_event("shutdown")
+async def shutdown():
+    """Cleanup on app shutdown"""
+    logger.info("🧹 Cleaning up media processor...")
+    media_processor.cleanup_all_files()
+    await media_processor.cleanup_session()
+
 @app.get("/")
 def root():
     """Health check endpoint"""
     return {
         "status": "running",
-        "version": "free_tier",
+        "version": "2.0.0_with_media",
         "bot_username": BOT_USERNAME,
         "check_interval_minutes": CHECK_INTERVAL / 60,
         "max_tweets_per_poll": MAX_TWEETS_PER_POLL,
@@ -288,7 +395,9 @@ def root():
         "features": {
             "mention_replies": True,
             "dm_replies": False,
-            "rate_limit_handling": True
+            "rate_limit_handling": True,
+            "media_processing": bool(MEDIA_API_URL),
+            "media_temp_files": len(media_processor.processed_files)
         }
     }
 
@@ -306,6 +415,11 @@ def health():
             "tier": "free",
             "max_tweets_per_poll": MAX_TWEETS_PER_POLL,
             "delay_between_replies": DELAY_BETWEEN_REPLIES
+        },
+        "media_processor": {
+            "enabled": bool(MEDIA_API_URL),
+            "temp_files_count": len(media_processor.processed_files),
+            "temp_dir": str(media_processor.temp_dir)
         }
     }
 
@@ -320,7 +434,37 @@ def stats():
         "configuration": {
             "bot_username": BOT_USERNAME,
             "check_interval_minutes": CHECK_INTERVAL / 60,
-            "llm_api_configured": bool(LLM_API_URL)
+            "llm_api_configured": bool(LLM_API_URL),
+            "media_api_configured": bool(MEDIA_API_URL)
+        },
+        "media_stats": {
+            "temp_files_active": len(media_processor.processed_files),
+            "temp_directory": str(media_processor.temp_dir)
+        }
+    }
+
+@app.post("/cleanup-media")
+async def cleanup_media():
+    """Manual endpoint to cleanup media files"""
+    file_count = len(media_processor.processed_files)
+    media_processor.cleanup_all_files()
+    return {
+        "status": "success",
+        "message": f"Cleaned up {file_count} temporary media files"
+    }
+
+@app.get("/media-stats")
+def media_stats():
+    """Get detailed media processing statistics"""
+    return {
+        "media_processor": {
+            "temp_directory": str(media_processor.temp_dir),
+            "active_temp_files": len(media_processor.processed_files),
+            "session_active": media_processor.session is not None and not media_processor.session.closed if media_processor.session else False
+        },
+        "api_configuration": {
+            "media_api_url": MEDIA_API_URL,
+            "media_processing_enabled": bool(MEDIA_API_URL)
         }
     }
 
