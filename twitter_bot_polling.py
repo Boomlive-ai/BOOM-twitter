@@ -1,4 +1,4 @@
-import os, pytz
+import os, pytz, re
 import time
 import logging
 import asyncio
@@ -267,7 +267,12 @@ async def poll_mentions():
                                 continue
                         
                         # Extract question text
-                        text = tweet.text.replace(f"@{BOT_USERNAME}", "").strip()
+
+                        # Remove all case-insensitive exact matches of the bot's username (e.g., @YourBot)
+                        text = re.sub(fr"\B@{re.escape(BOT_USERNAME)}\b", "", tweet.text, flags=re.IGNORECASE).strip()
+
+                        # Optional: clean up any extra spaces
+                        text = re.sub(r"\s+", " ", text).strip()
                         if not text:
                             text = "Hello!"
                         
