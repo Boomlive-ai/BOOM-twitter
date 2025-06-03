@@ -82,7 +82,8 @@ async def fetch_llm_response(question: str, thread_id: str, media_description: s
         
         params = {
             "question": full_question, 
-            "thread_id": thread_id
+            "thread_id": thread_id,
+            "using_Twitter": True
         }
         
         # Add media context as separate parameter if available
