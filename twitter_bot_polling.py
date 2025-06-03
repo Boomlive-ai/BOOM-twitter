@@ -298,7 +298,7 @@ async def poll_mentions():
                             reply = reply[:max_reply_length-3] + "..."
                         
                         # Create reply text
-                        reply_text = f"@{username} {reply}"
+                        reply_text = f"{reply}"
                         
                         # Post reply
                         try:
