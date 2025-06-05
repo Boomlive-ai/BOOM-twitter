@@ -9,6 +9,7 @@ import requests
 from datetime import datetime, timedelta
 from media_processor import MediaProcessor
 import tempfile
+from datetime import datetime
 
 # Load env
 load_dotenv()
@@ -293,9 +294,11 @@ async def poll_mentions():
                         # Get user info
                         user_info = await get_user_info(str(tweet.author_id))
                         username = user_info["username"]
-                        
+                        author_id = str(tweet.author_id)
+                        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')  # e.g., 20250605153245
+                        thread_id = f"{author_id}_{timestamp}"
                         # Get LLM response with media context
-                        reply = await fetch_llm_response(text, str(tweet.author_id), media_description)
+                        reply = await fetch_llm_response(text, thread_id, media_description)
                         
                         # Ensure reply fits Twitter's character limit
                         max_reply_length = 250  # Leave room for @username
