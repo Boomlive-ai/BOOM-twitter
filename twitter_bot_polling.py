@@ -686,7 +686,7 @@ async def build_llm_context(mention_text: str, conversation_context: dict, media
         author_info = original.get('author', {})
         author_name = author_info.get('username', 'unknown')
         
-        context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
+        # context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
         context_parts.append(f'"{original["text"]}"')
         
         if original.get('media'):
