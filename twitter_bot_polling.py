@@ -491,6 +491,556 @@
 
 
 
+# import os, pytz, re
+# import time
+# import logging
+# import asyncio
+# from fastapi import FastAPI
+# from dotenv import load_dotenv
+# import tweepy
+# import requests
+# from datetime import datetime, timedelta
+# from media_processor import MediaProcessor
+# import tempfile
+
+# # Load env
+# load_dotenv()
+# IST = pytz.timezone('Asia/Kolkata')
+
+# # Logging setup
+# logging.basicConfig(level=logging.INFO,
+#                     format="%(asctime)s %(levelname)s %(message)s",
+#                     datefmt="%Y-%m-%d %H:%M:%S")
+# logger = logging.getLogger(__name__)
+
+# # Twitter API credentials
+# TWITTER_API_KEY             = os.getenv("TWITTER_API_KEY")
+# TWITTER_API_SECRET          = os.getenv("TWITTER_API_SECRET")
+# TWITTER_ACCESS_TOKEN        = os.getenv("TWITTER_ACCESS_TOKEN")
+# TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_SECRET")
+# TWITTER_BEARER_TOKEN        = os.getenv("TWITTER_BEARER_TOKEN")
+# BOT_USERNAME                = os.getenv("BOT_USERNAME", "").lower()
+# CHECK_INTERVAL              = 900  # 15 minutes = 900 seconds
+# LLM_API_URL                 = os.getenv("LLM_API_URL")
+# MEDIA_API_URL               = os.getenv("MEDIA_API_URL")
+# DEFAULT_REPLY               = "Sorry, I can't answer right now."
+
+# # Free tier limits
+# MAX_TWEETS_PER_POLL = 20
+# DELAY_BETWEEN_REPLIES = 5
+
+# # Validate credentials
+# required = [TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]
+# if not all(required):
+#     logger.error("Missing Twitter API credentials in .env")
+#     raise SystemExit(1)
+
+# # Tweepy client
+# client = tweepy.Client(
+#     bearer_token=TWITTER_BEARER_TOKEN,
+#     consumer_key=TWITTER_API_KEY,
+#     consumer_secret=TWITTER_API_SECRET,
+#     access_token=TWITTER_ACCESS_TOKEN,
+#     access_token_secret=TWITTER_ACCESS_TOKEN_SECRET,
+#     wait_on_rate_limit=False
+# )
+
+# # Initialize media processor
+# media_processor = MediaProcessor()
+
+# # Track processed mentions
+# last_mention_id = None
+# bot_start_time = datetime.utcnow()
+# processed_tweet_ids = set()
+
+# async def get_conversation_context(mention_tweet_id: str, conversation_id: str) -> dict:
+#     """
+#     Enhanced function to get the original tweet and full conversation context
+#     when someone mentions the bot in a reply
+#     """
+#     context = {
+#         'original_tweet': None,
+#         'reply_chain': [],
+#         'media_content': [],
+#         'conversation_summary': ""
+#     }
+    
+#     try:
+#         # Get the original tweet (root of conversation)
+#         if conversation_id:
+#             logger.info(f"🔍 Fetching original tweet {conversation_id} for context")
+            
+#             original_response = client.get_tweet(
+#                 id=conversation_id,
+#                 expansions=["attachments.media_keys", "author_id"],
+#                 media_fields=["media_key", "type", "url", "variants", "alt_text"],
+#                 user_fields=["username", "name"],
+#                 tweet_fields=["created_at", "public_metrics", "attachments"]
+#             )
+            
+#             if original_response.data:
+#                 original_tweet = original_response.data
+#                 context['original_tweet'] = {
+#                     'id': original_tweet.id,
+#                     'text': original_tweet.text,
+#                     'author_id': original_tweet.author_id,
+#                     'created_at': original_tweet.created_at,
+#                     'media': []
+#                 }
+                
+#                 # Extract media from original tweet
+#                 if original_response.includes and 'media' in original_response.includes:
+#                     for media in original_response.includes['media']:
+#                         media_info = {
+#                             'type': media.type,
+#                             'url': getattr(media, 'url', None),
+#                             'alt_text': getattr(media, 'alt_text', None)
+#                         }
+#                         context['original_tweet']['media'].append(media_info)
+#                         context['media_content'].append(media)
+                
+#                 # Get author info
+#                 if original_response.includes and 'users' in original_response.includes:
+#                     author = original_response.includes['users'][0]
+#                     context['original_tweet']['author'] = {
+#                         'username': author.username,
+#                         'name': author.name
+#                     }
+                
+#                 logger.info(f"✅ Found original tweet by @{context['original_tweet'].get('author', {}).get('username', 'unknown')}")
+        
+#         # Get recent replies in the conversation for additional context
+#         try:
+#             conversation_search = client.search_recent_tweets(
+#                 query=f"conversation_id:{conversation_id}",
+#                 max_results=10,
+#                 tweet_fields=["author_id", "created_at", "in_reply_to_user_id"],
+#                 user_fields=["username"],
+#                 expansions=["author_id"]
+#             )
+            
+#             if conversation_search.data:
+#                 context['reply_chain'] = []
+#                 for reply in conversation_search.data:
+#                     reply_info = {
+#                         'id': reply.id,
+#                         'text': reply.text,
+#                         'author_id': reply.author_id,
+#                         'created_at': reply.created_at
+#                     }
+#                     context['reply_chain'].append(reply_info)
+                
+#                 logger.info(f"📝 Found {len(context['reply_chain'])} replies in conversation")
+        
+#         except Exception as e:
+#             logger.warning(f"⚠️ Could not fetch conversation replies: {e}")
+    
+#     except Exception as e:
+#         logger.error(f"❌ Error getting conversation context: {e}")
+    
+#     return context
+
+# # async def build_llm_context(mention_text: str, conversation_context: dict, media_description: str = "") -> str:
+# #     """
+# #     Build comprehensive context for LLM including original tweet, conversation, and media
+# #     """
+# #     context_parts = []
+    
+# #     # Add original tweet context
+# #     if conversation_context.get('original_tweet'):
+# #         original = conversation_context['original_tweet']
+# #         author_info = original.get('author', {})
+# #         author_name = author_info.get('username', 'unknown')
+        
+# #         context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
+# #         context_parts.append(f'"{original["text"]}"')
+        
+# #         if original.get('media'):
+# #             context_parts.append(f"[Original tweet has {len(original['media'])} media files]")
+    
+# #     # Add conversation flow if there are replies
+# #     if conversation_context.get('reply_chain') and len(conversation_context['reply_chain']) > 1:
+# #         context_parts.append(f"\nCONVERSATION CONTEXT ({len(conversation_context['reply_chain'])} replies):")
+# #         for i, reply in enumerate(conversation_context['reply_chain'][-3:]):  # Last 3 replies
+# #             context_parts.append(f"Reply {i+1}: {reply['text'][:100]}...")
+    
+# #     # Add media description
+# #     if media_description:
+# #         context_parts.append(f"\nMEDIA CONTENT: {media_description}")
+    
+# #     # Add the mention that triggered the bot
+# #     context_parts.append(f"\nUSER MENTIONED BOT: {mention_text}")
+# #     context_parts.append("\nPlease provide a helpful and contextual reply that addresses the user's request while considering the original tweet and conversation context.")
+    
+# #     return "\n".join(context_parts)
+# async def build_llm_context(mention_text: str, conversation_context: dict, media_description: str = "") -> str:
+#     """
+#     Build minimal LLM context: original tweet, media (if any), and user mention.
+#     """
+#     context_parts = []
+    
+#     # Add original tweet
+#     if conversation_context.get('original_tweet'):
+#         original = conversation_context['original_tweet']
+#         print(f"Original tweet found: {original['text']}...")  # Debug log
+#         author_info = original.get('author', {})
+#         author_name = author_info.get('username', 'unknown')
+        
+#         # context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
+#         context_parts.append(f'"{original["text"]}"')
+        
+#         if original.get('media'):
+#             context_parts.append(f"[Original tweet has {len(original['media'])} media files]")
+
+#     # Add media description if provided
+#     if media_description:
+#         context_parts.append(f"\nMEDIA CONTENT: {media_description}")
+
+#     # Add the mention that triggered the bot
+#     context_parts.append(f"\nUSER MENTIONED BOT: {mention_text}")
+
+#     return "\n".join(context_parts)
+
+# async def fetch_llm_response_enhanced(mention_text: str, thread_id: str, conversation_context: dict, media_description: str = "") -> str:
+#     """Enhanced LLM response with full conversation context"""
+#     if not LLM_API_URL:
+#         return DEFAULT_REPLY
+    
+#     try:
+#         # Build comprehensive context
+#         full_context = await build_llm_context(mention_text, conversation_context, media_description)
+#         print(f"Full context for LLM:\n{full_context}")  # Log first 500 chars for debugging
+#         logger.info(f"📤 Sending enhanced context to LLM ({len(full_context)} chars)")
+        
+#         params = {
+#             "question": full_context,
+#             "thread_id": thread_id,
+#             "using_Twitter": True,
+#             "context_type": "conversation_reply"
+#         }
+        
+#         # Add conversation metadata
+#         if conversation_context.get('original_tweet'):
+#             params["original_tweet_id"] = conversation_context['original_tweet']['id']
+#             params["conversation_id"] = conversation_context['original_tweet']['id']
+        
+#         resp = requests.get(LLM_API_URL, params=params, timeout=100)
+        
+#         if resp.status_code == 200:
+#             response_json = resp.json()
+#             response_text = response_json.get("response", DEFAULT_REPLY)
+#             logger.info(f"✅ Enhanced LLM response received: {len(response_text)} characters")
+#             return response_text
+#         else:
+#             logger.error(f"❌ LLM API returned status {resp.status_code}")
+    
+#     except requests.exceptions.Timeout:
+#         logger.error("⏰ LLM request timed out")
+#     except Exception as e:
+#         logger.error(f"❌ Enhanced LLM request failed: {e}")
+    
+#     return DEFAULT_REPLY
+
+# async def process_mention_with_context(tweet, resp_includes):
+#     """
+#     Enhanced mention processing that gets full conversation context
+#     """
+#     try:
+#         tweet_id = str(tweet.id)
+        
+#         # Skip if already processed
+#         if tweet.id in processed_tweet_ids:
+#             logger.info(f"⏭️ Skipping already processed tweet {tweet_id}")
+#             return False
+        
+#         # Add to processed set
+#         processed_tweet_ids.add(tweet.id)
+        
+#         # Extract mention text (remove bot username)
+#         mention_text = re.sub(fr"\B@{re.escape(BOT_USERNAME)}\b", "", tweet.text, flags=re.IGNORECASE).strip()
+#         mention_text = re.sub(r"\s+", " ", mention_text).strip()
+#         if not mention_text:
+#             mention_text = "Hello!"
+        
+#         logger.info(f"📝 Processing mention {tweet_id}: {mention_text[:50]}...")
+        
+#         # Get conversation context (this is the key enhancement!)
+#         conversation_id = getattr(tweet, 'conversation_id', None) or tweet_id
+#         conversation_context = await get_conversation_context(tweet_id, conversation_id)
+        
+#         # Process media from the mention tweet itself
+#         media_description = ""
+#         if MEDIA_API_URL:
+#             media_objects = extract_media_from_tweet_response(tweet, resp_includes)
+#             if media_objects:
+#                 logger.info(f"🖼️ Processing {len(media_objects)} media files from mention")
+#                 media_description = await process_tweet_media(tweet_id, media_objects)
+            
+#             # Also process media from original tweet if present
+#             if conversation_context.get('media_content'):
+#                 logger.info(f"🖼️ Processing {len(conversation_context['media_content'])} media files from original tweet")
+#                 original_media_desc = await process_tweet_media(
+#                     str(conversation_context['original_tweet']['id']), 
+#                     conversation_context['media_content']
+#                 )
+#                 if original_media_desc:
+#                     media_description = f"{media_description}\n[Original tweet media: {original_media_desc}]" if media_description else f"[Original tweet media: {original_media_desc}]"
+        
+#         # Get user info
+#         user_info = await get_user_info(str(tweet.author_id))
+#         username = user_info["username"]
+        
+#         # Create thread ID
+#         author_id = str(tweet.author_id)
+#         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+#         thread_id = f"{author_id}_{timestamp}"
+        
+#         # Get enhanced LLM response with full context
+#         reply = await fetch_llm_response_enhanced(
+#             mention_text, 
+#             thread_id, 
+#             conversation_context, 
+#             media_description
+#         )
+        
+#         # Ensure reply fits Twitter's character limit
+#         max_reply_length = 250
+#         if len(reply) > max_reply_length:
+#             reply = reply[:max_reply_length-3] + "..."
+        
+#         # Post reply
+#         try:
+#             response_tweet = client.create_tweet(
+#                 text=reply,
+#                 in_reply_to_tweet_id=tweet.id
+#             )
+            
+#             # Log success with context info
+#             context_info = ""
+#             if conversation_context.get('original_tweet'):
+#                 orig_author = conversation_context['original_tweet'].get('author', {}).get('username', 'unknown')
+#                 context_info = f" (replying to conversation started by @{orig_author})"
+            
+#             media_info = f" with media context" if media_description else ""
+#             logger.info(f"✅ Successfully replied to @{username}{context_info}{media_info}")
+            
+#             return True
+            
+#         except tweepy.TooManyRequests:
+#             logger.warning("⚠️ Rate limit hit on tweet creation")
+#             return False
+#         except Exception as e:
+#             logger.error(f"❌ Error creating reply: {e}")
+#             return False
+    
+#     except Exception as e:
+#         logger.error(f"❌ Error processing mention {tweet_id}: {e}")
+#         return False
+
+# def extract_media_from_tweet_response(tweet, includes):
+#     """Extract media objects from tweet response"""
+#     media_objects = []
+    
+#     try:
+#         if hasattr(tweet, 'attachments') and tweet.attachments:
+#             media_keys = tweet.attachments.get('media_keys', [])
+            
+#             if includes and 'media' in includes and media_keys:
+#                 media_lookup = {media.media_key: media for media in includes['media']}
+                
+#                 for media_key in media_keys:
+#                     if media_key in media_lookup:
+#                         media_objects.append(media_lookup[media_key])
+                
+#                 logger.info(f"🖼️ Found {len(media_objects)} media files")
+    
+#     except Exception as e:
+#         logger.error(f"❌ Error extracting media: {e}")
+    
+#     return media_objects
+
+# async def process_tweet_media(tweet_id: str, media_objects) -> str:
+#     """Process media from tweet and return description"""
+#     if not media_objects or not MEDIA_API_URL:
+#         return ""
+    
+#     try:
+#         logger.info(f"🖼️ Processing {len(media_objects)} media files from tweet {tweet_id}")
+        
+#         result = await media_processor.process_tweet_media_complete(
+#             media_objects, 
+#             tweet_id, 
+#             MEDIA_API_URL
+#         )
+        
+#         if result.get('errors'):
+#             logger.warning(f"⚠️ Media processing had errors: {result['errors']}")
+        
+#         media_description = result.get('combined_description', '')
+        
+#         if media_description:
+#             logger.info(f"✅ Media processed successfully: {len(media_description)} chars")
+#             return media_description
+#         else:
+#             logger.warning("⚠️ No description returned from media processing")
+#             return ""
+            
+#     except Exception as e:
+#         logger.error(f"❌ Error processing media: {e}")
+#         return ""
+
+# async def get_user_info(user_id: str) -> dict:
+#     """Get user information from user ID"""
+#     try:
+#         user = client.get_user(id=user_id)
+#         if user.data:
+#             return {
+#                 "username": user.data.username,
+#                 "name": user.data.name
+#             }
+#     except Exception as e:
+#         logger.error(f"Failed to get user info for {user_id}: {e}")
+    
+#     return {
+#         "username": f"user_{user_id}",
+#         "name": "Unknown User"
+#     }
+
+# async def poll_mentions():
+#     """Enhanced mention polling with conversation context"""
+#     global last_mention_id
+    
+#     logger.info(f"🚀 Starting enhanced mention polling (every {CHECK_INTERVAL/60} minutes)")
+#     logger.info(f"Bot username: @{BOT_USERNAME}")
+#     logger.info("✨ Enhanced features: Conversation context, Original tweet analysis, Full media processing")
+    
+#     await asyncio.sleep(30)  # Initial wait
+    
+#     query = f"@{BOT_USERNAME} -is:retweet"
+#     poll_count = 0
+    
+#     while True:
+#         poll_count += 1
+#         try:
+#             logger.info(f"🔍 Enhanced Poll #{poll_count}: Checking for mentions with conversation context...")
+            
+#             params = {
+#                 "query": query,
+#                 "max_results": MAX_TWEETS_PER_POLL,
+#                 "tweet_fields": ["author_id", "created_at", "conversation_id", "in_reply_to_user_id", "attachments"],
+#                 "user_fields": ["username", "name"],
+#                 "expansions": ["attachments.media_keys", "author_id"],
+#                 "media_fields": ["media_key", "type", "url", "variants", "alt_text"]
+#             }
+            
+#             if last_mention_id:
+#                 params["since_id"] = last_mention_id
+            
+#             try:
+#                 resp = client.search_recent_tweets(**params)
+#                 tweets = resp.data if resp.data else []
+                
+#             except tweepy.TooManyRequests as e:
+#                 wait_time = int(e.response.headers.get("x-rate-limit-reset", time.time())) - time.time()
+#                 wait_time = max(wait_time, 60)
+#                 logger.warning(f"⚠️ Rate limit hit, sleeping for {wait_time//60} minutes...")
+#                 await asyncio.sleep(wait_time)
+#                 continue
+#             except Exception as e:
+#                 logger.error(f"❌ Error searching tweets: {e}")
+#                 await asyncio.sleep(60)
+#                 continue
+
+#             if not tweets:
+#                 logger.info("✅ No new mentions found")
+#             else:
+#                 logger.info(f"📧 Found {len(tweets)} new mentions - processing with conversation context")
+                
+#                 successful_replies = 0
+#                 for tweet in reversed(tweets):  # Process oldest first
+#                     # Update last_mention_id
+#                     last_mention_id = max(int(last_mention_id or 0), tweet.id)
+                    
+#                     # Skip old tweets
+#                     if tweet.created_at and tweet.created_at.replace(tzinfo=None) < bot_start_time:
+#                         logger.info(f"⏭️ Skipping old tweet {tweet.id}")
+#                         continue
+                    
+#                     # Process with enhanced context
+#                     success = await process_mention_with_context(tweet, resp.includes)
+#                     if success:
+#                         successful_replies += 1
+                        
+#                         # Rate limit delay
+#                         if DELAY_BETWEEN_REPLIES > 0:
+#                             await asyncio.sleep(DELAY_BETWEEN_REPLIES)
+                
+#                 logger.info(f"📊 Successfully processed {successful_replies}/{len(tweets)} mentions with context")
+
+#         except Exception as e:
+#             logger.error(f"❌ Unexpected error in enhanced polling loop: {e}")
+#             await asyncio.sleep(60)
+        
+#         # Cleanup
+#         if len(processed_tweet_ids) > 1000:
+#             processed_tweet_ids.clear()
+#             logger.info("🧹 Cleared processed tweet IDs cache")
+        
+#         # Wait for next poll
+#         next_poll_time = datetime.utcnow() + timedelta(seconds=CHECK_INTERVAL)
+#         next_poll_time_ist = next_poll_time.astimezone(IST)
+#         logger.info(f"💤 Sleeping until next enhanced poll at {next_poll_time_ist.strftime('%H:%M:%S')}")
+#         await asyncio.sleep(CHECK_INTERVAL)
+
+# # FastAPI app remains the same...
+# app = FastAPI(title="Enhanced Twitter Bot with Conversation Context", version="3.0.0")
+
+# @app.on_event("startup")
+# async def startup():
+#     """Start the polling tasks"""
+#     logger.info("🚀 Starting Twitter bot with media processing")
+#     logger.info(f"Bot username: @{BOT_USERNAME}")
+#     logger.info(f"Check interval: {CHECK_INTERVAL/60} minutes")
+#     logger.info(f"Max tweets per poll: {MAX_TWEETS_PER_POLL}")
+#     logger.info(f"LLM API URL: {LLM_API_URL}")
+#     logger.info(f"Media API URL: {MEDIA_API_URL}")
+#     logger.info("📝 Note: DM polling disabled (not available in free tier)")
+    
+#     # Test API connection
+#     try:
+#         me = client.get_me()
+#         if me.data:
+#             logger.info(f"✅ Successfully authenticated as @{me.data.username}")
+#         else:
+#             logger.error("❌ Authentication test failed")
+#     except Exception as e:
+#         logger.error(f"❌ Authentication test error: {e}")
+    
+#     # Start mention polling
+#     asyncio.create_task(poll_mentions())
+
+# @app.get("/")
+# def root():
+#     return {
+#         "status": "running",
+#         "version": "3.0.0_enhanced_context",
+#         "features": {
+#             "conversation_context": True,
+#             "original_tweet_analysis": True,
+#             "enhanced_media_processing": True,
+#             "mention_replies": True
+#         }
+#     }
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+
+
+
+
+
 import os, pytz, re
 import time
 import logging
@@ -498,10 +1048,11 @@ import asyncio
 from fastapi import FastAPI
 from dotenv import load_dotenv
 import tweepy
-import requests
+import requests, re
 from datetime import datetime, timedelta
 from media_processor import MediaProcessor
 import tempfile
+from urllib.parse import urlparse
 
 # Load env
 load_dotenv()
@@ -552,6 +1103,206 @@ media_processor = MediaProcessor()
 last_mention_id = None
 bot_start_time = datetime.utcnow()
 processed_tweet_ids = set()
+
+def resolve_shortened_url(short_url):
+    try:
+        response = requests.get(short_url, allow_redirects=True)
+        return response.url
+    except requests.RequestException:
+        return short_url
+
+def extract_tweet_id_from_url(url: str) -> str:
+    """
+    Extract tweet ID from various Twitter URL formats:
+    - https://twitter.com/username/status/1234567890
+    - https://x.com/username/status/1234567890
+    - https://mobile.twitter.com/username/status/1234567890
+    - https://t.co/shortened_url (would need to be resolved first)
+    """
+    try:
+        url = resolve_shortened_url(url)  # Ensure full URL before extracting ID
+        # Handle common Twitter URL patterns
+        twitter_patterns = [
+            r'(?:twitter\.com|x\.com|mobile\.twitter\.com)/\w+/status/(\d+)',
+            r'twitter\.com/\w+/statuses/(\d+)',
+        ]
+        
+        for pattern in twitter_patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        logger.warning(f"Could not extract tweet ID from URL: {url}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error extracting tweet ID from URL {url}: {e}")
+        return None
+
+async def fetch_tweet_content(tweet_id: str) -> dict:
+    """
+    Fetch tweet content including text and media using the tweet ID
+    """
+    try:
+        logger.info(f"🔍 Fetching tweet content for ID: {tweet_id}")
+        
+        response = client.get_tweet(
+            id=tweet_id,
+            expansions=["attachments.media_keys", "author_id"],
+            media_fields=["media_key", "type", "url", "variants", "alt_text", "width", "height"],
+            user_fields=["username", "name"],
+            tweet_fields=["created_at", "public_metrics", "attachments"]
+        )
+        
+        if not response.data:
+            logger.warning(f"❌ Tweet {tweet_id} not found or not accessible")
+            return None
+        
+        tweet = response.data
+        tweet_content = {
+            'id': tweet.id,
+            'text': tweet.text,
+            'created_at': tweet.created_at,
+            'author': {'username': 'unknown', 'name': 'Unknown'},
+            'media': [],
+            'media_objects': []
+        }
+        
+        # Get author info
+        if response.includes and 'users' in response.includes:
+            author = response.includes['users'][0]
+            tweet_content['author'] = {
+                'username': author.username,
+                'name': author.name
+            }
+        
+        # Extract media
+        if response.includes and 'media' in response.includes:
+            for media in response.includes['media']:
+                media_info = {
+                    'type': media.type,
+                    'url': getattr(media, 'url', None),
+                    'alt_text': getattr(media, 'alt_text', None)
+                }
+                tweet_content['media'].append(media_info)
+                tweet_content['media_objects'].append(media)
+        
+        logger.info(f"✅ Successfully fetched tweet by @{tweet_content['author']['username']}")
+        if tweet_content['media']:
+            logger.info(f"🖼️ Tweet contains {len(tweet_content['media'])} media files")
+        
+        return tweet_content
+        
+    except tweepy.NotFound:
+        logger.warning(f"❌ Tweet {tweet_id} not found")
+        return None
+    except tweepy.Unauthorized:
+        logger.warning(f"🔒 Tweet {tweet_id} is private or restricted")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error fetching tweet {tweet_id}: {e}")
+        return None
+
+def extract_twitter_urls_from_text(text: str) -> list:
+    """
+    Extract all Twitter/X URLs from text
+    """
+    url_patterns = [
+        r'https?://(?:www\.)?(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+',
+        r'https?://t\.co/\w+'  # Shortened URLs that might be Twitter links
+    ]
+    
+    urls = []
+    for pattern in url_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        urls.extend(matches)
+       # Resolve shortened links
+    resolved_urls = [resolve_shortened_url(url) for url in urls]
+    return resolved_urls
+
+async def process_tweet_urls_in_mention(mention_text: str) -> dict:
+    """
+    Process any Twitter URLs found in the mention text and extract their content
+    """
+    tweet_contents = []
+    all_media_objects = []
+    
+    # Find Twitter URLs in the mention
+    twitter_urls = extract_twitter_urls_from_text(mention_text)
+    
+    if not twitter_urls:
+        return {
+            'tweet_contents': [],
+            'media_objects': [],
+            'processed_text': mention_text
+        }
+    
+    logger.info(f"🔗 Found {len(twitter_urls)} Twitter URLs in mention")
+    
+    # Process each Twitter URL
+    for url in twitter_urls:
+        tweet_id = extract_tweet_id_from_url(url)
+        if tweet_id:
+            tweet_content = await fetch_tweet_content(tweet_id)
+            if tweet_content:
+                tweet_contents.append(tweet_content)
+                all_media_objects.extend(tweet_content['media_objects'])
+                logger.info(f"✅ Processed tweet URL: {url}")
+            else:
+                logger.warning(f"⚠️ Could not fetch content for tweet URL: {url}")
+        else:
+            logger.warning(f"⚠️ Could not extract tweet ID from URL: {url}")
+    
+    # Remove URLs from the mention text for cleaner processing
+    processed_text = mention_text
+    for url in twitter_urls:
+        processed_text = processed_text.replace(url, "").strip()
+    processed_text = re.sub(r'\s+', ' ', processed_text).strip()
+    
+    return {
+        'tweet_contents': tweet_contents,
+        'media_objects': all_media_objects,
+        'processed_text': processed_text or "Please analyze the shared tweet(s)."
+    }
+
+async def build_llm_context_with_tweet_urls(mention_text: str, conversation_context: dict, 
+                                            tweet_url_data: dict, media_description: str = "") -> str:
+    """
+    Build comprehensive context including shared tweet URLs
+    """
+    context_parts = []
+    
+    # Add original tweet context (from conversation)
+    if conversation_context.get('original_tweet'):
+        original = conversation_context['original_tweet']
+        author_info = original.get('author', {})
+        author_name = author_info.get('username', 'unknown')
+        
+        context_parts.append(f'ORIGINAL TWEET by @{author_name}: "{original["text"]}"')
+        
+        if original.get('media'):
+            context_parts.append(f"[Original tweet has {len(original['media'])} media files]")
+    
+    # Add shared tweet URLs content
+    if tweet_url_data['tweet_contents']:
+        context_parts.append(f"\nSHARED TWEETS ({len(tweet_url_data['tweet_contents'])} tweets):")
+        for i, tweet_content in enumerate(tweet_url_data['tweet_contents'], 1):
+            author = tweet_content['author']['username']
+            text = tweet_content['text'][:200] + "..." if len(tweet_content['text']) > 200 else tweet_content['text']
+            context_parts.append(f"Tweet {i} by @{author}: \"{text}\"")
+            
+            if tweet_content['media']:
+                context_parts.append(f"[This tweet has {len(tweet_content['media'])} media files]")
+    
+    # Add media descriptions
+    if media_description:
+        context_parts.append(f"\nMEDIA CONTENT: {media_description}")
+    
+    # Add the processed mention text
+    processed_text = tweet_url_data['processed_text']
+    context_parts.append(f"\nUSER REQUEST: {processed_text}")
+    
+    return "\n".join(context_parts)
 
 async def get_conversation_context(mention_tweet_id: str, conversation_id: str) -> dict:
     """
@@ -640,83 +1391,27 @@ async def get_conversation_context(mention_tweet_id: str, conversation_id: str) 
     
     return context
 
-# async def build_llm_context(mention_text: str, conversation_context: dict, media_description: str = "") -> str:
-#     """
-#     Build comprehensive context for LLM including original tweet, conversation, and media
-#     """
-#     context_parts = []
-    
-#     # Add original tweet context
-#     if conversation_context.get('original_tweet'):
-#         original = conversation_context['original_tweet']
-#         author_info = original.get('author', {})
-#         author_name = author_info.get('username', 'unknown')
-        
-#         context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
-#         context_parts.append(f'"{original["text"]}"')
-        
-#         if original.get('media'):
-#             context_parts.append(f"[Original tweet has {len(original['media'])} media files]")
-    
-#     # Add conversation flow if there are replies
-#     if conversation_context.get('reply_chain') and len(conversation_context['reply_chain']) > 1:
-#         context_parts.append(f"\nCONVERSATION CONTEXT ({len(conversation_context['reply_chain'])} replies):")
-#         for i, reply in enumerate(conversation_context['reply_chain'][-3:]):  # Last 3 replies
-#             context_parts.append(f"Reply {i+1}: {reply['text'][:100]}...")
-    
-#     # Add media description
-#     if media_description:
-#         context_parts.append(f"\nMEDIA CONTENT: {media_description}")
-    
-#     # Add the mention that triggered the bot
-#     context_parts.append(f"\nUSER MENTIONED BOT: {mention_text}")
-#     context_parts.append("\nPlease provide a helpful and contextual reply that addresses the user's request while considering the original tweet and conversation context.")
-    
-#     return "\n".join(context_parts)
-async def build_llm_context(mention_text: str, conversation_context: dict, media_description: str = "") -> str:
-    """
-    Build minimal LLM context: original tweet, media (if any), and user mention.
-    """
-    context_parts = []
-    
-    # Add original tweet
-    if conversation_context.get('original_tweet'):
-        original = conversation_context['original_tweet']
-        print(f"Original tweet found: {original['text']}...")  # Debug log
-        author_info = original.get('author', {})
-        author_name = author_info.get('username', 'unknown')
-        
-        # context_parts.append(f"ORIGINAL TWEET by @{author_name}:")
-        context_parts.append(f'"{original["text"]}"')
-        
-        if original.get('media'):
-            context_parts.append(f"[Original tweet has {len(original['media'])} media files]")
-
-    # Add media description if provided
-    if media_description:
-        context_parts.append(f"\nMEDIA CONTENT: {media_description}")
-
-    # Add the mention that triggered the bot
-    context_parts.append(f"\nUSER MENTIONED BOT: {mention_text}")
-
-    return "\n".join(context_parts)
-
-async def fetch_llm_response_enhanced(mention_text: str, thread_id: str, conversation_context: dict, media_description: str = "") -> str:
-    """Enhanced LLM response with full conversation context"""
+async def fetch_llm_response_enhanced(mention_text: str, thread_id: str, conversation_context: dict, 
+                                    tweet_url_data: dict, media_description: str = "") -> str:
+    """Enhanced LLM response with full conversation context and tweet URL content"""
     if not LLM_API_URL:
         return DEFAULT_REPLY
     
     try:
-        # Build comprehensive context
-        full_context = await build_llm_context(mention_text, conversation_context, media_description)
-        print(f"Full context for LLM:\n{full_context}")  # Log first 500 chars for debugging
-        logger.info(f"📤 Sending enhanced context to LLM ({len(full_context)} chars)")
+        # Build comprehensive context including tweet URLs
+        full_context = await build_llm_context_with_tweet_urls(
+            mention_text, conversation_context, tweet_url_data, media_description
+        )
+        
+        logger.info(f"📤 Sending enhanced context with tweet URLs to LLM ({len(full_context)} chars)")
+        print(f"Full context preview:\n{full_context[:500]}...")  # Debug log
         
         params = {
             "question": full_context,
             "thread_id": thread_id,
             "using_Twitter": True,
-            "context_type": "conversation_reply"
+            "context_type": "conversation_reply_with_urls",
+            "shared_tweets_count": len(tweet_url_data['tweet_contents'])
         }
         
         # Add conversation metadata
@@ -743,7 +1438,7 @@ async def fetch_llm_response_enhanced(mention_text: str, thread_id: str, convers
 
 async def process_mention_with_context(tweet, resp_includes):
     """
-    Enhanced mention processing that gets full conversation context
+    Enhanced mention processing that gets full conversation context and processes tweet URLs
     """
     try:
         tweet_id = str(tweet.id)
@@ -757,34 +1452,44 @@ async def process_mention_with_context(tweet, resp_includes):
         processed_tweet_ids.add(tweet.id)
         
         # Extract mention text (remove bot username)
-        mention_text = re.sub(fr"\B@{re.escape(BOT_USERNAME)}\b", "", tweet.text, flags=re.IGNORECASE).strip()
-        mention_text = re.sub(r"\s+", " ", mention_text).strip()
-        if not mention_text:
-            mention_text = "Hello!"
+        raw_mention_text = re.sub(fr"\B@{re.escape(BOT_USERNAME)}\b", "", tweet.text, flags=re.IGNORECASE).strip()
+        raw_mention_text = re.sub(r"\s+", " ", raw_mention_text).strip()
+        if not raw_mention_text:
+            raw_mention_text = "Hello!"
         
-        logger.info(f"📝 Processing mention {tweet_id}: {mention_text[:50]}...")
+        logger.info(f"📝 Processing mention {tweet_id}: {raw_mention_text[:50]}...")
         
-        # Get conversation context (this is the key enhancement!)
+        # Process any Twitter URLs in the mention
+        tweet_url_data = await process_tweet_urls_in_mention(raw_mention_text)
+        mention_text = tweet_url_data['processed_text']
+        
+        if tweet_url_data['tweet_contents']:
+            logger.info(f"🔗 Found and processed {len(tweet_url_data['tweet_contents'])} shared tweets")
+        
+        # Get conversation context
         conversation_id = getattr(tweet, 'conversation_id', None) or tweet_id
         conversation_context = await get_conversation_context(tweet_id, conversation_id)
         
         # Process media from the mention tweet itself
         media_description = ""
+        all_media_objects = []
+        
         if MEDIA_API_URL:
-            media_objects = extract_media_from_tweet_response(tweet, resp_includes)
-            if media_objects:
-                logger.info(f"🖼️ Processing {len(media_objects)} media files from mention")
-                media_description = await process_tweet_media(tweet_id, media_objects)
+            # Media from the mention tweet
+            mention_media_objects = extract_media_from_tweet_response(tweet, resp_includes)
+            all_media_objects.extend(mention_media_objects)
             
-            # Also process media from original tweet if present
+            # Media from shared tweets
+            all_media_objects.extend(tweet_url_data['media_objects'])
+            
+            # Media from original tweet if present
             if conversation_context.get('media_content'):
-                logger.info(f"🖼️ Processing {len(conversation_context['media_content'])} media files from original tweet")
-                original_media_desc = await process_tweet_media(
-                    str(conversation_context['original_tweet']['id']), 
-                    conversation_context['media_content']
-                )
-                if original_media_desc:
-                    media_description = f"{media_description}\n[Original tweet media: {original_media_desc}]" if media_description else f"[Original tweet media: {original_media_desc}]"
+                all_media_objects.extend(conversation_context['media_content'])
+            
+            # Process all media together
+            if all_media_objects:
+                logger.info(f"🖼️ Processing {len(all_media_objects)} total media files")
+                media_description = await process_tweet_media(tweet_id, all_media_objects)
         
         # Get user info
         user_info = await get_user_info(str(tweet.author_id))
@@ -795,11 +1500,12 @@ async def process_mention_with_context(tweet, resp_includes):
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         thread_id = f"{author_id}_{timestamp}"
         
-        # Get enhanced LLM response with full context
+        # Get enhanced LLM response with full context including tweet URLs
         reply = await fetch_llm_response_enhanced(
             mention_text, 
             thread_id, 
-            conversation_context, 
+            conversation_context,
+            tweet_url_data,
             media_description
         )
         
@@ -819,10 +1525,12 @@ async def process_mention_with_context(tweet, resp_includes):
             context_info = ""
             if conversation_context.get('original_tweet'):
                 orig_author = conversation_context['original_tweet'].get('author', {}).get('username', 'unknown')
-                context_info = f" (replying to conversation started by @{orig_author})"
+                context_info = f" (conversation by @{orig_author})"
             
-            media_info = f" with media context" if media_description else ""
-            logger.info(f"✅ Successfully replied to @{username}{context_info}{media_info}")
+            url_info = f" + {len(tweet_url_data['tweet_contents'])} shared tweets" if tweet_url_data['tweet_contents'] else ""
+            media_info = f" + media" if media_description else ""
+            
+            logger.info(f"✅ Successfully replied to @{username}{context_info}{url_info}{media_info}")
             
             return True
             
@@ -907,12 +1615,12 @@ async def get_user_info(user_id: str) -> dict:
     }
 
 async def poll_mentions():
-    """Enhanced mention polling with conversation context"""
+    """Enhanced mention polling with conversation context and tweet URL processing"""
     global last_mention_id
     
-    logger.info(f"🚀 Starting enhanced mention polling (every {CHECK_INTERVAL/60} minutes)")
+    logger.info(f"🚀 Starting enhanced mention polling with tweet URL processing")
     logger.info(f"Bot username: @{BOT_USERNAME}")
-    logger.info("✨ Enhanced features: Conversation context, Original tweet analysis, Full media processing")
+    logger.info("✨ Features: Conversation context + Tweet URL extraction + Media processing")
     
     await asyncio.sleep(30)  # Initial wait
     
@@ -922,7 +1630,7 @@ async def poll_mentions():
     while True:
         poll_count += 1
         try:
-            logger.info(f"🔍 Enhanced Poll #{poll_count}: Checking for mentions with conversation context...")
+            logger.info(f"🔍 Enhanced Poll #{poll_count}: Checking for mentions...")
             
             params = {
                 "query": query,
@@ -954,7 +1662,7 @@ async def poll_mentions():
             if not tweets:
                 logger.info("✅ No new mentions found")
             else:
-                logger.info(f"📧 Found {len(tweets)} new mentions - processing with conversation context")
+                logger.info(f"📧 Found {len(tweets)} new mentions")
                 
                 successful_replies = 0
                 for tweet in reversed(tweets):  # Process oldest first
@@ -966,7 +1674,7 @@ async def poll_mentions():
                         logger.info(f"⏭️ Skipping old tweet {tweet.id}")
                         continue
                     
-                    # Process with enhanced context
+                    # Process with enhanced context including tweet URLs
                     success = await process_mention_with_context(tweet, resp.includes)
                     if success:
                         successful_replies += 1
@@ -975,10 +1683,10 @@ async def poll_mentions():
                         if DELAY_BETWEEN_REPLIES > 0:
                             await asyncio.sleep(DELAY_BETWEEN_REPLIES)
                 
-                logger.info(f"📊 Successfully processed {successful_replies}/{len(tweets)} mentions with context")
+                logger.info(f"📊 Successfully processed {successful_replies}/{len(tweets)} mentions")
 
         except Exception as e:
-            logger.error(f"❌ Unexpected error in enhanced polling loop: {e}")
+            logger.error(f"❌ Unexpected error in polling loop: {e}")
             await asyncio.sleep(60)
         
         # Cleanup
@@ -989,22 +1697,18 @@ async def poll_mentions():
         # Wait for next poll
         next_poll_time = datetime.utcnow() + timedelta(seconds=CHECK_INTERVAL)
         next_poll_time_ist = next_poll_time.astimezone(IST)
-        logger.info(f"💤 Sleeping until next enhanced poll at {next_poll_time_ist.strftime('%H:%M:%S')}")
+        logger.info(f"💤 Next poll at {next_poll_time_ist.strftime('%H:%M:%S')}")
         await asyncio.sleep(CHECK_INTERVAL)
 
-# FastAPI app remains the same...
-app = FastAPI(title="Enhanced Twitter Bot with Conversation Context", version="3.0.0")
+# FastAPI app
+app = FastAPI(title="Enhanced Twitter Bot with Tweet URL Processing", version="4.0.0")
 
 @app.on_event("startup")
 async def startup():
     """Start the polling tasks"""
-    logger.info("🚀 Starting Twitter bot with media processing")
+    logger.info("🚀 Starting enhanced Twitter bot with tweet URL processing")
     logger.info(f"Bot username: @{BOT_USERNAME}")
-    logger.info(f"Check interval: {CHECK_INTERVAL/60} minutes")
-    logger.info(f"Max tweets per poll: {MAX_TWEETS_PER_POLL}")
-    logger.info(f"LLM API URL: {LLM_API_URL}")
-    logger.info(f"Media API URL: {MEDIA_API_URL}")
-    logger.info("📝 Note: DM polling disabled (not available in free tier)")
+    logger.info("✨ Features: Tweet URL extraction + Conversation context + Media processing")
     
     # Test API connection
     try:
@@ -1019,18 +1723,51 @@ async def startup():
     # Start mention polling
     asyncio.create_task(poll_mentions())
 
+@app.on_event("shutdown")
+async def shutdown():
+    """Cleanup on app shutdown"""
+    logger.info("🧹 Cleaning up...")
+    media_processor.cleanup_all_files()
+    await media_processor.cleanup_session()
+
 @app.get("/")
 def root():
     return {
         "status": "running",
-        "version": "3.0.0_enhanced_context",
+        "version": "4.0.0_tweet_url_processing",
         "features": {
+            "tweet_url_extraction": True,
             "conversation_context": True,
-            "original_tweet_analysis": True,
-            "enhanced_media_processing": True,
+            "media_processing": True,
             "mention_replies": True
-        }
+        },
+        "supported_url_formats": [
+            "https://twitter.com/username/status/ID",
+            "https://x.com/username/status/ID",
+            "https://mobile.twitter.com/username/status/ID"
+        ]
     }
+
+@app.get("/test-url-extraction")
+def test_url_extraction():
+    """Test endpoint for URL extraction functionality"""
+    test_urls = [
+        "https://twitter.com/elonmusk/status/1234567890",
+        "https://x.com/openai/status/9876543210",
+        "Check this out: https://twitter.com/user/status/1111111111 and this https://x.com/other/status/2222222222"
+    ]
+    
+    results = []
+    for test_url in test_urls:
+        urls = extract_twitter_urls_from_text(test_url)
+        tweet_ids = [extract_tweet_id_from_url(url) for url in urls]
+        results.append({
+            "input": test_url,
+            "extracted_urls": urls,
+            "tweet_ids": tweet_ids
+        })
+    
+    return {"test_results": results}
 
 if __name__ == "__main__":
     import uvicorn
