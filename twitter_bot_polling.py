@@ -1063,6 +1063,15 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
+performance_metrics = {
+    "total_mentions_checked": 0,
+    "total_mentions_replied": 0,
+    "total_errors": 0,
+    "last_processed_mention_id": None,
+    "last_response_time": None,
+    "average_response_time_secs": 0.0,
+    "bot_start_time": datetime.utcnow().isoformat()
+}
 
 # Twitter API credentials
 TWITTER_API_KEY             = os.getenv("TWITTER_API_KEY")
@@ -1442,7 +1451,8 @@ async def process_mention_with_context(tweet, resp_includes):
     """
     try:
         tweet_id = str(tweet.id)
-        
+        start_time = time.time()
+
         # Skip if already processed
         if tweet.id in processed_tweet_ids:
             logger.info(f"⏭️ Skipping already processed tweet {tweet_id}")
@@ -1531,7 +1541,18 @@ async def process_mention_with_context(tweet, resp_includes):
             media_info = f" + media" if media_description else ""
             
             logger.info(f"✅ Successfully replied to @{username}{context_info}{url_info}{media_info}")
-            
+            end_time = time.time()
+            response_time = end_time - start_time
+            performance_metrics["total_mentions_replied"] += 1
+            performance_metrics["last_response_time"] = round(response_time, 2)
+
+            # Update average response time
+            count = performance_metrics["total_mentions_replied"]
+            prev_avg = performance_metrics["average_response_time_secs"]
+            performance_metrics["average_response_time_secs"] = round(
+                ((prev_avg * (count - 1)) + response_time) / count, 2
+            )
+
             return True
             
         except tweepy.TooManyRequests:
@@ -1543,6 +1564,8 @@ async def process_mention_with_context(tweet, resp_includes):
     
     except Exception as e:
         logger.error(f"❌ Error processing mention {tweet_id}: {e}")
+        performance_metrics["total_errors"] += 1
+
         return False
 
 def extract_media_from_tweet_response(tweet, includes):
@@ -1647,7 +1670,9 @@ async def poll_mentions():
             try:
                 resp = client.search_recent_tweets(**params)
                 tweets = resp.data if resp.data else []
-                
+                performance_metrics["total_mentions_checked"] += len(tweets)
+                performance_metrics["last_processed_mention_id"] = last_mention_id
+
             except tweepy.TooManyRequests as e:
                 wait_time = int(e.response.headers.get("x-rate-limit-reset", time.time())) - time.time()
                 wait_time = max(wait_time, 60)
@@ -1748,26 +1773,40 @@ def root():
         ]
     }
 
-@app.get("/test-url-extraction")
-def test_url_extraction():
-    """Test endpoint for URL extraction functionality"""
-    test_urls = [
-        "https://twitter.com/elonmusk/status/1234567890",
-        "https://x.com/openai/status/9876543210",
-        "Check this out: https://twitter.com/user/status/1111111111 and this https://x.com/other/status/2222222222"
-    ]
+@app.get("/metrics")
+def get_metrics():
+    return {
+        "bot": BOT_USERNAME,
+        "status": "running",
+        "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        "metrics": performance_metrics
+    }
+
+# @app.get("/ping")
+# def ping():
+#     return {"message": "pong"}
+
+
+# @app.get("/test-url-extraction")
+# def test_url_extraction():
+#     """Test endpoint for URL extraction functionality"""
+#     test_urls = [
+#         "https://twitter.com/elonmusk/status/1234567890",
+#         "https://x.com/openai/status/9876543210",
+#         "Check this out: https://twitter.com/user/status/1111111111 and this https://x.com/other/status/2222222222"
+#     ]
     
-    results = []
-    for test_url in test_urls:
-        urls = extract_twitter_urls_from_text(test_url)
-        tweet_ids = [extract_tweet_id_from_url(url) for url in urls]
-        results.append({
-            "input": test_url,
-            "extracted_urls": urls,
-            "tweet_ids": tweet_ids
-        })
+#     results = []
+#     for test_url in test_urls:
+#         urls = extract_twitter_urls_from_text(test_url)
+#         tweet_ids = [extract_tweet_id_from_url(url) for url in urls]
+#         results.append({
+#             "input": test_url,
+#             "extracted_urls": urls,
+#             "tweet_ids": tweet_ids
+#         })
     
-    return {"test_results": results}
+#     return {"test_results": results}
 
 if __name__ == "__main__":
     import uvicorn
