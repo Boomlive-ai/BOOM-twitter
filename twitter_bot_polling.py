@@ -1052,6 +1052,8 @@ import requests, re
 from datetime import datetime, timedelta
 from media_processor import MediaProcessor
 import tempfile
+from fastapi.middleware.cors import CORSMiddleware
+
 from urllib.parse import urlparse
 
 # Load env
@@ -1727,7 +1729,14 @@ async def poll_mentions():
 
 # FastAPI app
 app = FastAPI(title="Enhanced Twitter Bot with Tweet URL Processing", version="4.0.0")
-
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 @app.on_event("startup")
 async def startup():
     """Start the polling tasks"""
